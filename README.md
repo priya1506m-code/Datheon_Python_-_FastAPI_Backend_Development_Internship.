@@ -1,8 +1,10 @@
-# Book Management API
+# FastAPI JWT Authentication
 
-A beginner-friendly REST API built with FastAPI, Pydantic, and Uvicorn.
+A small starter API demonstrating user registration, bcrypt password hashing,
+OAuth2 password login, signed JWT access tokens, and protected routes.
 
 ## Requirements
+
 - Python 3.10+
 - pip
 
@@ -12,11 +14,11 @@ A beginner-friendly REST API built with FastAPI, Pydantic, and Uvicorn.
 python -m venv .venv
 ```
 
-Activate the virtual environment:
+Activate the environment:
 
-**Windows (PowerShell)**
-```powershell
-.venv\Scripts\Activate.ps1
+**Windows**
+```bash
+.venv\\Scripts\\activate
 ```
 
 **macOS / Linux**
@@ -30,47 +32,70 @@ Install dependencies:
 pip install -r requirements.txt
 ```
 
-## Run the server
+Create your environment file:
+
+**macOS / Linux**
+```bash
+cp .env.example .env
+```
+
+**Windows PowerShell**
+```powershell
+Copy-Item .env.example .env
+```
+
+Replace `SECRET_KEY` in `.env` with a long, random secret. For example, generate
+one with:
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+Run the API:
 
 ```bash
 uvicorn main:app --reload
 ```
 
-Open:
-- API root: http://127.0.0.1:8000/
-- Swagger UI: http://127.0.0.1:8000/docs
-- ReDoc: http://127.0.0.1:8000/redoc
+Open the interactive API documentation at http://127.0.0.1:8000/docs.
+ Swagger UI: http://127.0.0.1:8000/docs
 
 ## Endpoints
 
-| Method | Endpoint | Purpose |
+| Method | Endpoint | Authentication |
 |---|---|---|
-| POST | `/books` | Create a book |
-| GET | `/books` | List and filter books |
-| GET | `/books/{book_id}` | Retrieve one book |
-| PUT | `/books/{book_id}` | Update a book |
-| DELETE | `/books/{book_id}` | Delete a book |
+| POST | `/register` | Not required |
+| POST | `/login` | Not required |
+| GET | `/users/me` | Bearer token required |
+| GET | `/dashboard` | Bearer token required |
 
-## Example POST body
+## Test in Swagger UI
 
-```json
-{
-  "title": "The Alchemist",
-  "author": "Paulo Coelho",
-  "publication_year": 1988,
-  "genre": "Fiction"
-}
-```
+1. Use `POST /register` with a JSON body:
 
-## Filtering examples
+   ```json
+   {
+     "username": "john",
+     "password": "mypassword123"
+   }
+   ```
 
-- `/books?author=paulo`
-- `/books?title=alchemist`
-- `/books?publication_year=1988`
-- Combine filters: `/books?author=paulo&publication_year=1988`
+2. Use `POST /login`. This endpoint expects form fields (`username` and
+   `password`), not a JSON body.
+3. Copy the returned `access_token`.
+4. Click **Authorize** in Swagger UI and enter the username/password, or use
+   the token as a Bearer token in an API client.
+5. Call `GET /users/me` or `GET /dashboard`.
+6. Call a protected endpoint without a token to confirm it returns HTTP 401.
 
 ## Notes
-- Book IDs are generated automatically.
-- The API uses in-memory storage for simplicity. All records are cleared when the server stops.
-- `PUT` updates only the fields supplied in the request; omitted fields remain unchanged.
-- Invalid request data is automatically rejected by Pydantic with HTTP 422.
+
+- This project uses an in-memory dictionary for demonstration. Registered users
+  disappear when the server restarts. Use a database such as PostgreSQL for
+  persistent storage.
+- Passwords are hashed with bcrypt; plaintext passwords are never stored.
+- Passwords are limited to 72 characters because bcrypt has a 72-byte input
+  limit. For production, validate UTF-8 byte length as well.
+- Use HTTPS in production, protect your secret key, add login rate limiting,
+  and design a refresh-token/revocation strategy if needed.
+- This is a learning starter, not a complete production identity system.

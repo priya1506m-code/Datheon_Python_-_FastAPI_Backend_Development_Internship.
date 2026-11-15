@@ -1,102 +1,126 @@
+from datetime import datetime, timedelta, timezone
 from typing import Optional
+import os
 
-from fastapi import FastAPI, HTTPException, Query, Response, status
+from dotenv import load_dotenv
+from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from jose import JWTError, jwt
+from passlib.context import CryptContext
 from pydantic import BaseModel, Field
 
+load_dotenv()
 
-app = FastAPI(
-    title="Book Management API",
-    description="A simple REST API to create, read, update, delete, and filter books.",
-    version="1.0.0",
+SECRET_KEY = os.getenv("SECRET_KEY")
+ALGORITHM = os.getenv("ALGORITHM", "HS256")
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
+
+if not SECRET_KEY:
+    raise RuntimeError("SECRET_KEY must be configured in the .env file")
+
+app = FastAPI(title="FastAPI JWT Authentication", version="1.0.0")
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
+
+# Demo-only in-memory storage. Replace with a persistent database in production.
+fake_users_db: dict[str, dict[str, str]] = {}
+
+
+class UserCreate(BaseModel):
+    username: str = Field(min_length=3, max_length=50)
+    password: str = Field(min_length=8, max_length=72)
+
+
+class UserResponse(BaseModel):
+    username: str
+
+
+def hash_password(password: str) -> str:
+    return pwd_context.hash(password)
+
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return pwd_context.verify(plain_password, hashed_password)
+
+
+def create_access_token(data: dict) -> str:
+    payload = data.copy()
+    payload["exp"] = datetime.now(timezone.utc) + timedelta(
+        minutes=ACCESS_TOKEN_EXPIRE_MINUTES
+    )
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+
+async def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: Optional[str] = payload.get("sub")
+        if not username:
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+
+    user = fake_users_db.get(username)
+    if user is None:
+        raise credentials_exception
+    return user
+
+
+@app.post(
+    "/register",
+    response_model=UserResponse,
+    status_code=status.HTTP_201_CREATED,
 )
-
-
-class BookCreate(BaseModel):
-    title: str = Field(..., min_length=1, max_length=200)
-    author: str = Field(..., min_length=1, max_length=120)
-    publication_year: int = Field(..., ge=0, le=2100)
-    genre: Optional[str] = Field(default=None, max_length=80)
-
-
-class BookUpdate(BaseModel):
-    title: Optional[str] = Field(default=None, min_length=1, max_length=200)
-    author: Optional[str] = Field(default=None, min_length=1, max_length=120)
-    publication_year: Optional[int] = Field(default=None, ge=0, le=2100)
-    genre: Optional[str] = Field(default=None, max_length=80)
-
-
-class Book(BookCreate):
-    id: int
-
-
-# In-memory storage. Data resets whenever the server restarts.
-books: dict[int, Book] = {}
-next_book_id = 1
-
-
-@app.get("/", tags=["General"])
-def root():
-    return {"message": "Welcome to the Book Management API", "docs": "/docs"}
-
-
-@app.post("/books", response_model=Book, status_code=status.HTTP_201_CREATED, tags=["Books"])
-def create_book(book_data: BookCreate):
-    global next_book_id
-
-    book = Book(id=next_book_id, **book_data.model_dump())
-    books[next_book_id] = book
-    next_book_id += 1
-    return book
-
-
-@app.get("/books", response_model=list[Book], tags=["Books"])
-def get_books(
-    title: Optional[str] = Query(default=None, description="Filter by title (case-insensitive partial match)"),
-    author: Optional[str] = Query(default=None, description="Filter by author (case-insensitive partial match)"),
-    publication_year: Optional[int] = Query(default=None, ge=0, le=2100),
-):
-    results = list(books.values())
-
-    if title:
-        results = [book for book in results if title.casefold() in book.title.casefold()]
-    if author:
-        results = [book for book in results if author.casefold() in book.author.casefold()]
-    if publication_year is not None:
-        results = [book for book in results if book.publication_year == publication_year]
-
-    return results
-
-
-@app.get("/books/{book_id}", response_model=Book, tags=["Books"])
-def get_book(book_id: int):
-    book = books.get(book_id)
-    if book is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Book not found")
-    return book
-
-
-@app.put("/books/{book_id}", response_model=Book, tags=["Books"])
-def update_book(book_id: int, book_data: BookUpdate):
-    existing_book = books.get(book_id)
-    if existing_book is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Book not found")
-
-    updates = book_data.model_dump(exclude_unset=True)
-    if not updates:
+async def register(user: UserCreate):
+    if user.username in fake_users_db:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Provide at least one field to update",
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Username already exists",
         )
 
-    updated_book = existing_book.model_copy(update=updates)
-    books[book_id] = updated_book
-    return updated_book
+    fake_users_db[user.username] = {
+        "username": user.username,
+        "hashed_password": hash_password(user.password),
+    }
+    return {"username": user.username}
 
 
-@app.delete("/books/{book_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Books"])
-def delete_book(book_id: int):
-    if book_id not in books:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Book not found")
+@app.post("/login")
+async def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    user = fake_users_db.get(form_data.username)
 
-    del books[book_id]
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    if user is None or not verify_password(
+        form_data.password, user["hashed_password"]
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    token = create_access_token({"sub": user["username"]})
+    return {"access_token": token, "token_type": "bearer"}
+
+
+@app.get("/users/me")
+async def read_current_user(current_user: dict = Depends(get_current_user)):
+    return {
+        "message": "Authenticated successfully",
+        "username": current_user["username"],
+    }
+
+
+@app.get("/dashboard")
+async def dashboard(current_user: dict = Depends(get_current_user)):
+    return {
+        "message": "Welcome to your dashboard!",
+        "user": current_user["username"],
+        "data": "This is protected information.",
+    }
