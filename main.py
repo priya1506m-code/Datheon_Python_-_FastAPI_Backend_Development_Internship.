@@ -1,126 +1,91 @@
-from datetime import datetime, timedelta, timezone
-from typing import Optional
-import os
-
-from dotenv import load_dotenv
+from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from jose import JWTError, jwt
-from passlib.context import CryptContext
-from pydantic import BaseModel, Field
+from fastapi.security import OAuth2PasswordRequestForm
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from database import Base, engine, get_db
+from models import Note, User
+from schemas import NoteCreate, NoteRead, UserCreate, UserRead
+from security import create_access_token, get_current_user, hash_password, verify_password
 
-load_dotenv()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    yield
+    await engine.dispose()
 
-SECRET_KEY = os.getenv("SECRET_KEY")
-ALGORITHM = os.getenv("ALGORITHM", "HS256")
-ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
+app = FastAPI(title="FastAPI JWT + SQLAlchemy Notes API", lifespan=lifespan)
 
-if not SECRET_KEY:
-    raise RuntimeError("SECRET_KEY must be configured in the .env file")
-
-app = FastAPI(title="FastAPI JWT Authentication", version="1.0.0")
-
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
-
-# Demo-only in-memory storage. Replace with a persistent database in production.
-fake_users_db: dict[str, dict[str, str]] = {}
-
-
-class UserCreate(BaseModel):
-    username: str = Field(min_length=3, max_length=50)
-    password: str = Field(min_length=8, max_length=72)
-
-
-class UserResponse(BaseModel):
-    username: str
-
-
-def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
-
-
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
-
-
-def create_access_token(data: dict) -> str:
-    payload = data.copy()
-    payload["exp"] = datetime.now(timezone.utc) + timedelta(
-        minutes=ACCESS_TOKEN_EXPIRE_MINUTES
-    )
-    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
-
-
-async def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username: Optional[str] = payload.get("sub")
-        if not username:
-            raise credentials_exception
-    except JWTError:
-        raise credentials_exception
-
-    user = fake_users_db.get(username)
-    if user is None:
-        raise credentials_exception
+@app.post("/register", response_model=UserRead, status_code=201)
+async def register(payload: UserCreate, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(User).where(User.username == payload.username))
+    if result.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail="Username already exists")
+    user = User(username=payload.username, hashed_password=hash_password(payload.password))
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
     return user
 
-
-@app.post(
-    "/register",
-    response_model=UserResponse,
-    status_code=status.HTTP_201_CREATED,
-)
-async def register(user: UserCreate):
-    if user.username in fake_users_db:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Username already exists",
-        )
-
-    fake_users_db[user.username] = {
-        "username": user.username,
-        "hashed_password": hash_password(user.password),
-    }
-    return {"username": user.username}
-
-
 @app.post("/login")
-async def login(form_data: OAuth2PasswordRequestForm = Depends()):
-    user = fake_users_db.get(form_data.username)
+async def login(form: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(User).where(User.username == form.username))
+    user = result.scalar_one_or_none()
+    if user is None or not verify_password(form.password, user.hashed_password):
+        raise HTTPException(status_code=401, detail="Incorrect username or password",
+                            headers={"WWW-Authenticate": "Bearer"})
+    return {"access_token": create_access_token({"sub": str(user.id)}), "token_type": "bearer"}
 
-    if user is None or not verify_password(
-        form_data.password, user["hashed_password"]
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect username or password",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+@app.get("/users/me", response_model=UserRead)
+async def me(user: User = Depends(get_current_user)):
+    return user
 
-    token = create_access_token({"sub": user["username"]})
-    return {"access_token": token, "token_type": "bearer"}
+@app.post("/notes", response_model=NoteRead, status_code=201)
+async def create_note(payload: NoteCreate, user: User = Depends(get_current_user),
+                      db: AsyncSession = Depends(get_db)):
+    note = Note(**payload.model_dump(), owner_id=user.id)
+    db.add(note)
+    await db.commit()
+    await db.refresh(note)
+    return note
 
+@app.get("/notes", response_model=list[NoteRead])
+async def list_notes(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Note).where(Note.owner_id == user.id).order_by(Note.created_at.desc()))
+    return result.scalars().all()
 
-@app.get("/users/me")
-async def read_current_user(current_user: dict = Depends(get_current_user)):
-    return {
-        "message": "Authenticated successfully",
-        "username": current_user["username"],
-    }
+@app.get("/notes/{note_id}", response_model=NoteRead)
+async def get_note(note_id: int, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Note).where(Note.id == note_id, Note.owner_id == user.id))
+    note = result.scalar_one_or_none()
+    if note is None:
+        raise HTTPException(status_code=404, detail="Note not found")
+    return note
 
+@app.put("/notes/{note_id}", response_model=NoteRead)
+async def update_note(note_id: int, payload: NoteCreate, user: User = Depends(get_current_user),
+                      db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Note).where(Note.id == note_id, Note.owner_id == user.id))
+    note = result.scalar_one_or_none()
+    if note is None:
+        raise HTTPException(status_code=404, detail="Note not found")
+    note.title, note.content = payload.title, payload.content
+    await db.commit()
+    await db.refresh(note)
+    return note
+
+@app.delete("/notes/{note_id}", status_code=204)
+async def delete_note(note_id: int, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Note).where(Note.id == note_id, Note.owner_id == user.id))
+    note = result.scalar_one_or_none()
+    if note is None:
+        raise HTTPException(status_code=404, detail="Note not found")
+    await db.delete(note)
+    await db.commit()
 
 @app.get("/dashboard")
-async def dashboard(current_user: dict = Depends(get_current_user)):
-    return {
-        "message": "Welcome to your dashboard!",
-        "user": current_user["username"],
-        "data": "This is protected information.",
-    }
+async def dashboard(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Note).where(Note.owner_id == user.id))
+    return {"message": f"Welcome, {user.username}!", "user_id": user.id,
+            "notes_count": len(result.scalars().all())}

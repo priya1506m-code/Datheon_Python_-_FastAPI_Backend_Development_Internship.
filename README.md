@@ -1,101 +1,97 @@
-# FastAPI JWT Authentication
+# FastAPI JWT + Async SQLAlchemy Notes API
 
-A small starter API demonstrating user registration, bcrypt password hashing,
-OAuth2 password login, signed JWT access tokens, and protected routes.
-
-## Requirements
-
-- Python 3.10+
-- pip
+Persistent REST API using FastAPI, SQLAlchemy 2.x async sessions, SQLite,
+bcrypt password hashing, JWT bearer authentication, and a one-to-many
+User -> Notes relationship.
 
 ## Setup
+
+Python 3.10+ recommended.
 
 ```bash
 python -m venv .venv
 ```
 
-Activate the environment:
+Activate:
+- Windows PowerShell: `.venv\\Scripts\\Activate.ps1`
+- macOS/Linux: `source .venv/bin/activate`
 
-**Windows**
-```bash
-.venv\\Scripts\\activate
-```
-
-**macOS / Linux**
-```bash
-source .venv/bin/activate
-```
-
-Install dependencies:
+Install and configure:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Create your environment file:
-
-**macOS / Linux**
-```bash
-cp .env.example .env
-```
-
-**Windows PowerShell**
-```powershell
-Copy-Item .env.example .env
-```
-
-Replace `SECRET_KEY` in `.env` with a long, random secret. For example, generate
-one with:
+Copy `.env.example` to `.env` (Windows: `Copy-Item .env.example .env`;
+macOS/Linux: `cp .env.example .env`). Set `SECRET_KEY` to a strong random
+secret. Generate one using:
 
 ```bash
 python -c "import secrets; print(secrets.token_urlsafe(48))"
 ```
 
-Run the API:
+Run:
 
 ```bash
 uvicorn main:app --reload
 ```
 
-Open the interactive API documentation at http://127.0.0.1:8000/docs.
- Swagger UI: http://127.0.0.1:8000/docs
+Swagger UI: http://127.0.0.1:8000/docs
 
-## Endpoints
+SQLite tables are created at startup. The `app.db` file persists between
+server restarts; do not delete it if you want to retain data.
 
-| Method | Endpoint | Authentication |
-|---|---|---|
-| POST | `/register` | Not required |
-| POST | `/login` | Not required |
-| GET | `/users/me` | Bearer token required |
-| GET | `/dashboard` | Bearer token required |
+## Routes
 
-## Test in Swagger UI
+| Method | Endpoint | Auth | Purpose |
+|---|---|---|---|
+| POST | `/register` | No | Register user |
+| POST | `/login` | No | Get JWT (form fields) |
+| GET | `/users/me` | Yes | Current profile |
+| POST | `/notes` | Yes | Create note |
+| GET | `/notes` | Yes | List own notes |
+| GET | `/notes/{note_id}` | Yes | Read own note |
+| PUT | `/notes/{note_id}` | Yes | Update own note |
+| DELETE | `/notes/{note_id}` | Yes | Delete own note |
+| GET | `/dashboard` | Yes | User dashboard and note count |
 
-1. Use `POST /register` with a JSON body:
+## Quick test
 
-   ```json
-   {
-     "username": "john",
-     "password": "mypassword123"
-   }
-   ```
+1. POST `/register` with JSON:
+   `{"username":"john","password":"mypassword123"}`
+2. POST `/login` with form fields `username` and `password`; copy `access_token`.
+3. Click **Authorize** in Swagger UI and authenticate.
+4. POST `/notes` with JSON:
+   `{"title":"My first note","content":"Saved in SQLite."}`
+5. GET `/notes`; stop and restart the server, log in again, and GET `/notes`.
+   Your note should remain.
 
-2. Use `POST /login`. This endpoint expects form fields (`username` and
-   `password`), not a JSON body.
-3. Copy the returned `access_token`.
-4. Click **Authorize** in Swagger UI and enter the username/password, or use
-   the token as a Bearer token in an API client.
-5. Call `GET /users/me` or `GET /dashboard`.
-6. Call a protected endpoint without a token to confirm it returns HTTP 401.
+## Data model and implementation
 
-## Notes
+- `database.py`: async engine, `async_sessionmaker`, Base, and `get_db`.
+- `models.py`: SQLAlchemy User and Note models with a one-to-many relationship.
+- `schemas.py`: Pydantic request/response DTOs.
+- `security.py`: bcrypt, JWT and `get_current_user`.
+- `main.py`: API routes and startup table creation.
+- Each note is scoped to its authenticated owner; users cannot access other
+  users' notes through these endpoints.
 
-- This project uses an in-memory dictionary for demonstration. Registered users
-  disappear when the server restarts. Use a database such as PostgreSQL for
-  persistent storage.
-- Passwords are hashed with bcrypt; plaintext passwords are never stored.
-- Passwords are limited to 72 characters because bcrypt has a 72-byte input
-  limit. For production, validate UTF-8 byte length as well.
-- Use HTTPS in production, protect your secret key, add login rate limiting,
-  and design a refresh-token/revocation strategy if needed.
-- This is a learning starter, not a complete production identity system.
+## PostgreSQL
+
+Install the async driver:
+
+```bash
+pip install asyncpg
+```
+
+Create a PostgreSQL database, then set in `.env`:
+
+```env
+DATABASE_URL=postgresql+asyncpg://user:password@localhost:5432/notes_db
+```
+
+## Production notes
+
+This starter uses `Base.metadata.create_all()` for local convenience. Use
+Alembic migrations for schema changes in production. Add tests, rate limiting,
+HTTPS, secret management, backups, and monitoring before deployment.
